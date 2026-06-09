@@ -21,9 +21,8 @@ interface ChatPartner {
   avatar_url: string;
 }
 
-// 📌 পরিবর্তন: প্রডাকশন ও লোকালহোস্ট দুটোর জন্যই ডাইনামিক সকেট URL কনফিগারেশন
+// 📌 ডাইনামিক সকেট URL কনফিগারেশন
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4000";
-const socket: Socket = io(SOCKET_URL);
 
 export default function ChatPage() {
   const { id: roomId } = useParams() as { id: string };
@@ -38,6 +37,7 @@ export default function ChatPage() {
   
   const chatEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   const getPartnerInfoData = useCallback(async (currentUserId: string) => {
     const { data: members, error: memError } = await supabase
@@ -77,6 +77,7 @@ export default function ChatPage() {
 
     let isSubscribed = true;
 
+    // ১. চ্যাট হিস্ট্রি ও পার্টনার ইনফো লোড করা
     Promise.all([
       getPartnerInfoData(user.id),
       getChatHistoryData()
@@ -87,22 +88,48 @@ export default function ChatPage() {
       }
     }).catch(err => console.error("Error loading chat assets:", err));
 
-    socket.emit('join_room', roomId);
+    // ২. সকেট কানেকশন তৈরি করা (কম্পোনেন্টের ভিতরে, মডিউল লেভেলে না)
+    const socket = io(SOCKET_URL, {
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+    });
+    socketRef.current = socket;
 
+    // ৩. প্রতিবার কানেক্ট/রিকানেক্ট হলে রুমে জয়েন করা
+    // এটাই মূল ফিক্স: আগে শুধু একবার join_room হতো, রিকানেক্টে হতো না
+    const handleConnect = () => {
+      console.log('Socket connected:', socket.id);
+      socket.emit('join_room', roomId);
+    };
+
+    socket.on('connect', handleConnect);
+
+    // যদি ইতিমধ্যে কানেক্টেড থাকে তাহলে সাথে সাথে জয়েন করো
+    if (socket.connected) {
+      socket.emit('join_room', roomId);
+    }
+
+    // ৪. রিসিভ মেসেজ হ্যান্ডলার
     socket.on('receive_message', (data: Message) => {
       if (isSubscribed) setMessages((prev) => [...prev, data]);
     });
 
+    // ৫. টাইপিং ইন্ডিকেটর হ্যান্ডলার
     socket.on('display_typing', (data: { room_id: string; username: string; isTyping: boolean }) => {
       if (isSubscribed && data.room_id === roomId) {
         setIsPartnerTyping(data.isTyping);
       }
     });
 
+    // ৬. ক্লিনআপ: সকেট সম্পূর্ণভাবে ডিসকানেক্ট করা
     return () => {
       isSubscribed = false;
+      socket.off('connect', handleConnect);
       socket.off('receive_message');
       socket.off('display_typing');
+      socket.disconnect();
+      socketRef.current = null;
     };
   }, [roomId, user, loading, router, getPartnerInfoData, getChatHistoryData]);
 
@@ -114,14 +141,14 @@ export default function ChatPage() {
     setInput(e.target.value);
     if (!user) return;
 
-    socket.emit('typing', { room_id: roomId, username: user.username, isTyping: true });
+    socketRef.current?.emit('typing', { room_id: roomId, username: user.username, isTyping: true });
 
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current);
     }
 
     typingTimeoutRef.current = setTimeout(() => {
-      socket.emit('typing', { room_id: roomId, username: user.username, isTyping: false });
+      socketRef.current?.emit('typing', { room_id: roomId, username: user.username, isTyping: false });
     }, 2000);
   };
 
@@ -138,11 +165,11 @@ export default function ChatPage() {
     };
 
     setMessages((prev) => [...prev, messageData]);
-    socket.emit('send_message', messageData);
+    socketRef.current?.emit('send_message', messageData);
     setInput("");
     
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    socket.emit('typing', { room_id: roomId, username: user.username, isTyping: false });
+    socketRef.current?.emit('typing', { room_id: roomId, username: user.username, isTyping: false });
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -171,7 +198,7 @@ export default function ChatPage() {
       };
 
       setMessages((prev) => [...prev, messageData]);
-      socket.emit('send_message', messageData);
+      socketRef.current?.emit('send_message', messageData);
     } catch (error) {
       console.error("Image Upload Failed:", error);
     } finally {
@@ -182,18 +209,18 @@ export default function ChatPage() {
   if (loading || !user) return null;
 
   return (
-    <div className="relative flex h-screen w-full flex-col bg-[#0b0c22] text-white antialiased overflow-hidden selection:bg-[#2F2FE4]/30">
-      <div className="absolute top-[-20%] left-[25%] h-[600px] w-[600px] rounded-full bg-cyan-500/10 blur-[140px] pointer-events-none" />
-      <div className="absolute top-[30%] right-[10%] h-[500px] w-[500px] rounded-full bg-blue-600/10 blur-[160px] pointer-events-none" />
+    <div className="relative h-screen w-full flex flex-col bg-[#0b0c22] text-white antialiased overflow-hidden selection:bg-[#2F2FE4]/30">
+      <div className="absolute top-[-20%] left-[20%] h-[560px] w-[560px] rounded-full bg-cyan-500/10 blur-[140px] pointer-events-none" />
+      <div className="absolute top-[30%] right-[5%] h-[440px] w-[440px] rounded-full bg-blue-600/10 blur-[160px] pointer-events-none" />
 
       {/* ১. গ্লাসমরফিক টপ হেডার বার */}
-      <div className="flex h-16 w-full items-center justify-between border-b border-white/10 bg-[#1A1953]/40 backdrop-blur-md px-6 py-3 shadow-lg shrink-0 z-20">
-        <div className="flex items-center gap-4">
+      <div className="sticky top-0 z-30 flex h-16 w-full items-center justify-between border-b border-white/10 bg-[#1A1953]/40 backdrop-blur-md px-4 sm:px-6 py-3 shadow-lg">
+        <div className="flex items-center gap-3 min-w-0">
           <button onClick={() => router.push('/dashboard')} className="p-2 rounded-full hover:bg-white/10 transition text-xl text-gray-300 hover:text-white">
             <AiOutlineArrowLeft />
           </button>
           
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <div className="relative h-10 w-10 shrink-0">
               {chatPartner?.avatar_url ? (
                 <Image 
@@ -219,12 +246,12 @@ export default function ChatPage() {
       </div>
 
       {/* ২. গ্লাসমরফিক চ্যাট বাবল এরিয়া */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4 w-full z-10 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto px-4 py-5 pb-28 sm:px-6 sm:py-6 sm:pb-28 space-y-4 w-full z-10 custom-scrollbar">
         {messages.map((msg, index) => {
           const isMe = msg.sender_id === user.id;
           return (
             <div key={index} className={`flex w-full ${isMe ? 'justify-end' : 'justify-start'}`}>
-              <div className={`flex items-end gap-3 max-w-[70%] ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
+              <div className={`flex items-end gap-3 max-w-[90%] sm:max-w-[70%] ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
                 
                 {!isMe && chatPartner?.avatar_url && (
                   <div className="relative h-7 w-7 shrink-0">
@@ -246,7 +273,7 @@ export default function ChatPage() {
                   {msg.content && <p className="leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>}
                   
                   {msg.image_url && (
-                    <div className="mt-2 overflow-hidden rounded-xl border border-white/10 max-w-xs">
+                    <div className="mt-2 overflow-hidden rounded-xl border border-white/10 max-w-full sm:max-w-xs">
                       <Image 
                         src={msg.image_url} 
                         alt="Shared attachment" 
@@ -296,8 +323,8 @@ export default function ChatPage() {
       </div>
 
       {/* ৩. বটম ট্রিমড গ্লাসমরফিক ইনপুট প্যানেল */}
-      <div className="bg-[#1A1953]/30 backdrop-blur-md p-4 border-t border-white/10 shrink-0 z-20 w-full">
-        <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto flex items-center gap-3 bg-[#080616]/60 border border-white/10 rounded-full px-4 py-1.5 shadow-inner">
+      <div className="sticky bottom-0 z-30 bg-[#1A1953]/30 backdrop-blur-md p-3 sm:p-4 border-t border-white/10 shrink-0 w-full">
+        <form onSubmit={handleSendMessage} className="w-full max-w-full mx-auto flex items-center gap-3 bg-[#080616]/60 border border-white/10 rounded-full px-3 py-2 sm:px-4 sm:py-2.5 shadow-inner">
           
           <label className="cursor-pointer p-2 rounded-full text-gray-400 hover:text-cyan-400 hover:bg-white/5 transition-all shrink-0 text-xl">
             <AiOutlinePicture />
@@ -313,7 +340,7 @@ export default function ChatPage() {
             value={input}
             onChange={handleInputChange}
             placeholder="Aa" 
-            className="flex-1 bg-transparent px-2 py-2 text-sm text-white placeholder-gray-500 outline-none"
+            className="flex-1 min-w-0 bg-transparent px-2 py-2 text-sm text-white placeholder-gray-500 outline-none"
           />
           
           <button 

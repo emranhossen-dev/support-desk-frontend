@@ -5,6 +5,10 @@ import { AuthProvider } from "@/context/AuthContext";
 export const metadata: Metadata = {
   title: "Super-Fast Messenger",
   description: "Luminous Glassmorphic Chat Application",
+  viewport: {
+    width: 'device-width',
+    initialScale: 1,
+  },
 };
 
 export default function RootLayout({
